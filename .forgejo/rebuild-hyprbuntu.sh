@@ -56,6 +56,28 @@ say "user: $(id -un) uid=$(id -u)  cpus: $(nproc 2>/dev/null || echo ?)  src: $S
 # ---------------------------------------------------------------------------
 # 1. Toolchain. The runner image is minimal (no zstd, which is what killed the
 #    previous job), so everything the build needs is installed here.
+#
+#    This list is what the *machine* has, and two entries in it are not
+#    optional even though the build only mentions them indirectly:
+#
+#      * glslang-tools. glslang-dev ships the CMake config, and that config
+#        eagerly checks that the imported target glslang::glslang-standalone
+#        resolves to a file that exists. The file is /usr/bin/glslang, which
+#        lives in glslang-tools, and glslang-dev does not depend on it
+#        (Depends: spirv-tools-dev only). Without it find_package(glslang)
+#        fails with "references the file /usr/bin/glslang ... but this file
+#        does not exist" and configure stops.
+#
+#      * libudis86-dev. Two reasons it has to be the apt package rather than
+#        the in-tree submodule. One, the submodule points at github.com and
+#        this runner has no proxy, so the clone leaves subprojects/udis86 an
+#        empty directory and CMake's fallback add_subdirectory() dies on the
+#        missing CMakeLists.txt. Two, the machine links Hyprland against the
+#        shared libudis86 (pkg-config finds 1.7.2 there), so installing the
+#        same package keeps the CI binary's linkage identical to the one the
+#        bundle was made from, instead of silently switching it to a static
+#        copy. Version 0+20221013-1.1build1 is what 26.04 carries, and it is
+#        the same version the laptop has.
 # ---------------------------------------------------------------------------
 if command -v apt-get >/dev/null; then
   say "== installing the build toolchain (apt) =="
@@ -66,9 +88,10 @@ if command -v apt-get >/dev/null; then
     file zstd xz-utils \
     libxkbcommon-dev uuid-dev libcairo2-dev libpango1.0-dev libpixman-1-dev \
     libxcursor-dev libdrm-dev libinput-dev libeis-dev libgbm-dev \
-    libglib2.0-dev libmuparser-dev liblcms2-dev glslang-dev \
+    libglib2.0-dev libmuparser-dev liblcms2-dev glslang-dev glslang-tools \
     libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev \
     libseat-dev libdisplay-info-dev libliftoff-dev libudev-dev \
+    libudis86-dev \
     libtomlplusplus-dev libwayland-dev libxcb1-dev libxcb-composite0-dev \
     libxcb-ewmh-dev libxcb-icccm4-dev libxcb-keysyms1-dev libxcb-render-util0-dev \
     libxcb-res0-dev libxcb-xinput-dev libxcb-xkb-dev libxkbcommon-x11-dev \
