@@ -1,0 +1,203 @@
+# Republish the `hyprbuntu` vendored component -- the Hyprland stack this
+# machine runs -- as a bundle on the Forgejo generic registry.
+#
+# This job builds NOTHING and fetches nothing but its own packaging scripts. It
+# re-tars the live trees -- Hyprland and the hyprwm binaries under
+# /usr/local/bin, plus the libraries and headers under /usr and /usr/local --
+# exactly as publish.sh's select_hyprbuntu() enumerates them. "Rebuild" below
+# means "re-tar what is installed", not "install the commit being pushed".
+#
+# That is the whole answer to this runner having no proxy, and it is also why
+# this workflow lives here rather than in the chezmoi repo that owns every
+# other component's republish job. A from-source build cannot be done on this
+# host: upstream's CMake pulls three github.com submodules
+# (hyprland-protocols, udis86, tracy) and the hyprwm dependency chain
+# (aquamarine, hyprlang, hyprutils, hyprcursor, hyprgraphics, hyprwire,
+# hyprtoolkit) is cloned from github.com as well, while installing the result
+# writes into root-owned /usr/local. So the sequence stays: build and install
+# locally (dot_local/bin/setup-hyprbuntu.sh, CC=gcc-16), push to this fork, and
+# let this job snapshot what got installed. A push is therefore read as
+# "re-snapshot this machine now", and a push that changed no source still
+# re-uploads the same ~13 MB; the prune step below is what keeps that from
+# piling up in the registry.
+#
+# The upstream .github/workflows files were deleted from this fork and must not
+# be restored. Forgejo reads them as workflows, and every one of them reaches
+# for a host this runner cannot reach: actions/checkout and hyprwm/actions come
+# from data.forgejo.org and github.com, nix-ci builds the repo through
+# github.com, and the security scan clones
+# data.forgejo.org/david-a-wheeler/flawfinder. Each is a guaranteed failure
+# here, and because this runner has capacity 1 that queue is not merely noise:
+# a job waiting behind it can time out and be marked failed before it ever
+# starts. .forgejo/ is the only CI directory read now.
+#
+# runs-on: ubuntu-latest is this laptop's own runner -- see
+# ~/.local/share/forgejo-runner, label `ubuntu-latest:host`, host backend. It
+# runs jobs on the host rather than in a container, and that is load-bearing:
+# publish.sh packages the machine's real /usr/local and /usr trees, so the job
+# has to see them.
+#
+# There is deliberately no actions/checkout step, for the same reason
+# nvim-package.yml in chezmoi has none: the default action source is
+# data.forgejo.org. The fetch step below clones chezmoi over git.vedaru.cn
+# instead, with the same per-command credential helper and IPv4 pin
+# bootstrap.sh uses. That clone exists only to supply publish.sh and
+# MANIFEST.md, which live in the chezmoi repo; nothing in it goes into the
+# bundle.
+#
+# The last two steps are the only ones that touch the registry. publish.sh
+# overwrites the bundle; the prune then deletes every *other* hyprbuntu
+# version, so the registry holds one. That delete is bounded by a keep set of
+# two versions, not one: the version just published, and the version
+# ansible/group_vars/all.yml tells a restore to fetch. Those are two
+# hand-maintained copies of one number -- publish.sh's component_version() and
+# the vendored_components entry -- so keeping both means a drifted pair can
+# never leave a restore asking for a bundle that was just deleted. It also
+# makes the steady state a no-op.
+
+name: Republish hyprbuntu bundle
+
+on:
+  # Every push to a vedaru/* branch re-snapshots the installed stack. There is
+  # no branch-name literal to keep in sync with the fork's working branch, and
+  # no path filter either: the bundle is a snapshot of /usr/local and /usr, so
+  # no path in this repo can tell the runner whether the installed stack
+  # changed.
+  push:
+    branches: ['vedaru/**']
+  # The manual "snapshot now" button: for a stack that changed with no commit,
+  # or to retry a run that died on this runner's flaky link to git.vedaru.cn.
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch chezmoi (publish.sh and MANIFEST.md only)
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Cloudflare completes the TCP handshake on its IPv6 addresses and then
+          # drops the TLS ClientHello, and neither curl nor the libcurl inside
+          # git retries the next address after a TLS failure -- the hazard
+          # bootstrap.sh documents. http.curloptResolve (git >= 2.46) is curl's
+          # --resolve: pin the name to one IPv4 address, and SNI and the
+          # certificate stay valid.
+          ip=$(getent ahostsv4 git.vedaru.cn | awk 'NR==1 {print $1}')
+          # Hand the token to git through a per-command credential helper rather
+          # than the remote URL, so it stays out of .git/config and `git remote
+          # -v`. Same shape as bootstrap.sh's git_secret().
+          helper='!f() { echo "username=x"; printf "password=%s\n" "$FORGEJO_TOKEN"; }; f'
+          rm -rf "$RUNNER_TEMP/chezmoi-src"
+          # Always chezmoi's main, never $GITHUB_REF_NAME: this job runs in the
+          # Hyprland fork, where that variable holds a Hyprland branch name.
+          git -c credential.helper= -c "credential.helper=$helper" \
+              -c "http.curloptResolve=git.vedaru.cn:443:$ip" \
+              clone --quiet --depth 1 --branch main \
+              https://git.vedaru.cn/Vedaru/chezmoi.git "$RUNNER_TEMP/chezmoi-src"
+
+      - name: Rebuild and republish the hyprbuntu bundle
+        # --replace forces the re-upload. The registry is immutable per version,
+        # so publish.sh turns the resulting 409 into a DELETE-then-PUT; without
+        # --replace the same-size skip would quietly leave the old bundle in
+        # place. That matters more here than for the other components, because a
+        # version that gains the IME fix without being renamed (a rebuild of the
+        # same v0.56.2-vedaru1) is exactly the case the size heuristic can miss.
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+          # Build into the job's own temp dir rather than publish.sh's default
+          # /tmp/vendored-build. On this host a CI run and a hand-run would
+          # otherwise write files.txt / MANIFEST.tsv / the tarball into the same
+          # directory at the same time and corrupt each other's output.
+          OUT_DIR: ${{ runner.temp }}/vendored-build
+        run: bash "$RUNNER_TEMP/chezmoi-src/ansible/vendored/publish.sh" hyprbuntu --replace
+
+      - name: Keep only the current and pinned hyprbuntu versions
+        # Runs only after the upload above succeeded, so the new bundle is
+        # already in place before anything is removed. Every failure mode here
+        # (no artifact, unreadable pin, API error) aborts before any DELETE.
+        #
+        # Versions are enumerated from the registry rather than from a list of
+        # known versions, because the whole point is to find the ones nobody
+        # remembers: a bundle left behind by a past Hyprland rebuild.
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+          OUT_DIR: ${{ runner.temp }}/vendored-build
+        run: |
+          set -euo pipefail
+
+          # The version actually published, read off the artifact publish.sh
+          # wrote instead of re-deriving it, so this file holds no second copy
+          # of the number that could drift from publish.sh's own. Counted by
+          # hand rather than with `ls | wc -l`: under `set -o pipefail` an
+          # unmatched glob makes ls exit 1 and kills the script before the
+          # check below can say why.
+          count=0
+          for f in "$OUT_DIR"/hyprbuntu-*/hyprbuntu-*.tar.zst; do
+            [ -e "$f" ] || continue
+            count=$((count + 1))
+            tarball="$f"
+          done
+          if [ "$count" -ne 1 ]; then
+            echo "expected 1 published hyprbuntu tarball under $OUT_DIR, found $count" >&2
+            exit 1
+          fi
+          built=$(basename "$tarball" .tar.zst)
+          built=${built#hyprbuntu-}
+
+          # The version a restore will ask for. Reported verbatim so a drift
+          # between it and $built is visible in the log rather than silent.
+          pinned=$(python3 - "$RUNNER_TEMP/chezmoi-src/ansible/group_vars/all.yml" <<'PY'
+          import sys, yaml
+          comps = yaml.safe_load(open(sys.argv[1]))["vendored_components"]
+          print(next(c["version"] for c in comps if c["name"] == "hyprbuntu"))
+          PY
+          )
+          if [ -z "$pinned" ]; then
+            echo "could not read the pinned hyprbuntu version from group_vars/all.yml" >&2
+            exit 1
+          fi
+          echo "published $built; restore pin says $pinned"
+
+          # Downloaded to a file, then parsed: a JSON array cannot be safely
+          # scraped with grep, and keeping the parser out of a command
+          # substitution keeps it readable as ordinary Python.
+          listing="$RUNNER_TEMP/hyprbuntu-packages.json"
+          curl -4 -fsSL -H "Authorization: token $FORGEJO_TOKEN" \
+               "https://git.vedaru.cn/api/v1/packages/Vedaru?type=generic&q=hyprbuntu&limit=50" \
+               > "$listing" || true
+          # An empty file means the GET failed (curl -f wrote nothing, and its
+          # error is already on stderr). Say so here rather than let the parser
+          # below raise a JSON traceback over the same cause.
+          if [ ! -s "$listing" ]; then
+            echo "could not download the hyprbuntu registry listing" >&2
+            exit 1
+          fi
+          versions=$(python3 - "$listing" <<'PY'
+          import json, sys
+          for p in json.load(open(sys.argv[1])):
+              if p["name"] == "hyprbuntu":
+                  print(p["version"])
+          PY
+          )
+
+          kept=0
+          for v in $versions; do
+            if [ "$v" = "$built" ] || [ "$v" = "$pinned" ]; then
+              echo "  keep   hyprbuntu $v"
+              kept=$((kept + 1))
+            else
+              code=$(curl -4 -sS -o /dev/null -w '%{http_code}' -X DELETE \
+                     -H "Authorization: token $FORGEJO_TOKEN" \
+                     "https://git.vedaru.cn/api/v1/packages/Vedaru/generic/hyprbuntu/$v")
+              echo "  delete hyprbuntu $v -> HTTP $code"
+            fi
+          done
+          # A keep set that matched nothing means the enumeration is broken, not
+          # that there was nothing left to keep. Fail loudly rather than report
+          # a clean prune off an empty listing.
+          if [ "$kept" -eq 0 ]; then
+            echo "no version matched the keep set; registry listing looks wrong" >&2
+            exit 1
+          fi
