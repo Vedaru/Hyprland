@@ -22,7 +22,14 @@
 #
 #   runner:
 #     labels:
-#       - "glibc:docker://ubuntu:24.04"
+#       - "glibc:docker://ubuntu:26.04"
+#
+# 26.04 specifically, not 24.04. The bundle's binaries ask for GLIBC_2.38 and
+# GLIBCXX_3.4.35. 24.04's glibc 2.39 would satisfy the first, but its
+# libstdc++ is GCC 13's, which stops at GLIBCXX_3.4.32 -- so a 24.04 image
+# cannot start them, let alone build against them. 26.04 is also the release
+# the build's own dependency versions were picked from (libabsl, libre2-11,
+# libpugixml1v5, and g++-16 for std::ranges::starts_with).
 #
 # That indirection is the whole design, and it is not a preference. This
 # instance has two runners: this laptop's, which is host-backend, and the
@@ -51,7 +58,7 @@ jobs:
     runs-on: glibc
     steps:
       - name: Install git and curl into the container
-        # ubuntu:24.04 is bare: the clone below needs git, and git needs curl
+        # The image is bare: the clone below needs git, and git needs curl
         # and ca-certificates. Nothing else is installed here -- the toolchain
         # the build itself needs is installed by rebuild-hyprbuntu.sh, so that
         # the recipe for it lives in one place.

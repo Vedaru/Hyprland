@@ -64,7 +64,7 @@ say "user: $(id -un) uid=$(id -u)  cpus: $(nproc 2>/dev/null || echo ?)  src: $S
 #    toolchain plus the pkg-config deps CMakeLists.txt's `deps` call requires.
 #    When that block changes, diff it against this one.
 #
-#    Four entries are easy to leave out because the build only mentions them
+#    Eight entries are easy to leave out because the build only mentions them
 #    indirectly, and each was a separate failed run before it was added:
 #
 #      * libglaze-dev. Without it find_package(glaze) is QUIET-false and
@@ -74,6 +74,16 @@ say "user: $(id -un) uid=$(id -u)  cpus: $(nproc 2>/dev/null || echo ?)  src: $S
 #        there, but only after trying the network. glaze is header-only and,
 #        on the machine, a plain system package outside the bundle, so CI has
 #        to install it too.
+#
+#      * libabsl-dev. The bundle ships its own re2 under /usr/lib/x86_64-linux-gnu
+#        (re2.pc, the headers, libre2.so), and that re2.pc's `Requires:` line
+#        names fifteen absl_* modules. Those .pc files are not in the bundle --
+#        on the machine they come from libabsl-dev -- so pkg-config stops at
+#        "Package 'absl_absl_check', required by 're2', not found" and
+#        CMakeLists.txt:269 fails the whole `deps` call. Same shape as
+#        libglaze-dev: a plain system package that the bundle's own pkg-config
+#        metadata depends on and the bundle does not contain. The machine runs
+#        20260107.0-4, and ubuntu:26.04 carries that same version.
 #
 #      * glslang-tools. glslang-dev ships the CMake config, and that config
 #        eagerly checks that the imported target glslang::glslang-standalone
@@ -93,6 +103,52 @@ say "user: $(id -un) uid=$(id -u)  cpus: $(nproc 2>/dev/null || echo ?)  src: $S
 #        instead of silently switching it to a static copy. Version
 #        0+20221013-1.1build1 is what 26.04 carries: the machine's version.
 #
+#      * libre2-11 and libpugixml1v5, the two *runtime* halves of libraries
+#        whose build files the bundle ships. The bundle has re2's dev files
+#        (re2.pc, the headers, the cmake config) and a lib symlink
+#        /usr/lib/x86_64-linux-gnu/libre2.so -> libre2.so.11, but no
+#        libre2.so.11 itself, so that symlink dangles and every ELF linked
+#        against re2 fails to start. On the machine the .so comes from apt
+#        (libre2-11) while the dev files come from the vendored src build --
+#        setup-hyprbuntu.sh builds re2 from source because 26.04's libre2-dev
+#        is too old -- so apt has to supply just the runtime here too.
+#        The scanners (hyprwayland-scanner, hyprwire-scanner, both run by the
+#        build before ninja compiles anything) need libpugixml.so.1 the same
+#        way: the bundle carries the scanner binaries but not pugixml.
+#
+#      * librsvg2-2, libzip5, libheif1, libjpeg-turbo8, libjxl0.11 and
+#        libwebp7. The six runtimes that the bundle's own libhyprcursor.so and
+#        libhyprgraphics.so record as DT_NEEDED while leaving their symbols
+#        undefined: hyprcursor calls zip_* and rsvg_*, hyprgraphics calls Jxl*,
+#        WebP* and the jpeg/heif entry points. When the output is an executable
+#        rather than a shared library, ld does not by default tolerate
+#        undefined symbols in the shared libraries on the link line
+#        (--no-allow-shlib-undefined is the default for executables), so the
+#        final link of Hyprland dies with "undefined
+#        reference to `JxlDecoderProcessInput@JXL_0'" even though every one of
+#        Hyprland's own objects compiled. None of these six is a file the
+#        bundle ships -- it carries hyprcursor and hyprgraphics themselves,
+#        not what they link against -- so, like re2 and pugixml above, apt has
+#        to supply them. On the machine they arrive transitively through the
+#        -dev packages the hyprcursor and hyprgraphics blocks install
+#        (librsvg2-dev, libzip-dev, libheif-dev, libjpeg-dev, libjxl-dev,
+#        libwebp-dev -- setup-hyprbuntu.sh:479-492); CI names the runtime
+#        halves directly, because CI builds none of these from source and the
+#        link resolves against the sonames, not the dev symlinks.
+#
+#        libmagic.so.1 is the seventh DT_NEEDED of libhyprgraphics.so and
+#        needs no entry: `file` is already in the list below, and libmagic1t64
+#        is its dependency (the 64-bit-time_t name for libmagic1).
+#
+#      * gcc-16 and g++-16, not the default compilers. 26.04's default is GCC
+#        15, whose libstdc++ has no std::ranges::starts_with (C++23, added in
+#        libstdc++ with GCC 16), so the build dies on
+#        src/helpers/MiscFunctions.cpp:841 -- 'starts_with' is not a member of
+#        'std::ranges'. This is not a CI-only quirk: setup-hyprbuntu.sh:594
+#        builds the machine's own Hyprland with `CC=gcc-16 CXX=g++-16` for
+#        exactly this reason. Building with 15 would not merely fail, it would
+#        produce a different binary from the one this bundle is meant to be.
+#
 #      * liblua5.5-dev, not liblua5.4-dev. CMakeLists.txt:291 searches
 #        `lua55 lua5.5 ... lua>=5.5 lua<5.6`, so a 5.4 package satisfies none
 #        of them. The machine runs liblua5.5-dev (its lua.pc reports 5.5.0).
@@ -107,11 +163,15 @@ if command -v apt-get >/dev/null; then
   apt-get update -y
   apt-get install -y --no-install-recommends \
     build-essential cmake ninja-build pkg-config git curl ca-certificates \
+    gcc-16 g++-16 \
     file zstd xz-utils \
     libxkbcommon-dev uuid-dev libcairo2-dev libpango1.0-dev libpixman-1-dev \
     libxcursor-dev libdrm-dev libinput-dev libeis-dev libgbm-dev \
     libglib2.0-dev libmuparser-dev liblcms2-dev glslang-dev glslang-tools \
     libglaze-dev \
+    libabsl-dev \
+    libre2-11 libpugixml1v5 \
+    librsvg2-2 libzip5 libheif1 libjpeg-turbo8 libjxl0.11 libwebp7 \
     libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev \
     libseat-dev libdisplay-info-dev libliftoff-dev libudev-dev \
     libudis86-dev \
@@ -166,10 +226,18 @@ fi
 # 3. Build Hyprland from this checkout, against the extracted packages.
 # ---------------------------------------------------------------------------
 say "== configuring Hyprland =="
+# /usr/local, not /usr: the bundle already has the Hyprland binary at
+# /usr/local/bin/Hyprland and nowhere else (its assets are under
+# /usr/local/share/{hypr,wayland-sessions}). A /usr-prefix install would write
+# /usr/bin/Hyprland and leave the old /usr/local/bin/Hyprland in place, and
+# since /usr/local/bin precedes /usr/bin in PATH that stale binary would be the
+# one that runs -- the rebuilt one would never be used.
 export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig"
 cmake -S "$SRC" -B /tmp/hyprland-build -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_INSTALL_PREFIX=/usr \
+      -DCMAKE_C_COMPILER=gcc-16 \
+      -DCMAKE_CXX_COMPILER=g++-16 \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
       -DCMAKE_INSTALL_LIBDIR=lib \
       -DCMAKE_PREFIX_PATH="/usr/local;/usr" \
       -DBUILD_TESTING=OFF \
