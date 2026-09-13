@@ -17,10 +17,15 @@
 # ansible/vendored/publish.sh in chezmoi. That script tars the live /usr/local
 # and /usr of whatever machine it runs on, which is meaningless on a runner.
 #
-# The job's own log is uploaded to the `hyprbuntu-ci` package at the end. That
-# is not decoration: this instance sits behind Cloudflare, which answers every
-# action-log URL with a JS challenge, and Forgejo exposes no log API, so the
-# registry is the only channel through which the log can be read from outside.
+# The job's own log is uploaded to the `hyprbuntu-ci` package by a separate
+# step that runs `if: always()`. That is not decoration: this instance sits
+# behind Cloudflare, which answers every action-log URL with a JS challenge,
+# and Forgejo exposes no log API, so the registry is the only channel through
+# which the log can be read from outside. Keeping the upload in its own step
+# matters -- if it shared a step with the build and the runner killed that
+# step, the log would be destroyed with it, which is exactly how a failure
+# becomes invisible. The two steps share /tmp on the runner, so the first
+# writes and the second reads the same file no matter which of them fails.
 
 name: Rebuild hyprbuntu bundle
 
@@ -40,27 +45,59 @@ jobs:
           set -uo pipefail
           log=/tmp/hyprbuntu-build.log
 
-          # No actions/checkout: the default action source is data.forgejo.org,
-          # which this runner cannot reach. Clone this repo over git.vedaru.cn
-          # instead, with the same per-command credential helper and IPv4 pin
-          # the rest of this repo's CI uses (Cloudflare completes the TCP
-          # handshake on its IPv6 addresses and then drops the TLS ClientHello).
-          ip=$(getent ahostsv4 git.vedaru.cn | awk 'NR==1 {print $1}')
-          helper='!f() { echo "username=x"; printf "password=%s\n" "$FORGEJO_TOKEN"; }; f'
-          rm -rf "$RUNNER_TEMP/src"
-          git -c credential.helper= -c "credential.helper=$helper" \
-              -c "http.curloptResolve=git.vedaru.cn:443:$ip" \
-              clone --quiet --depth 1 --branch "$GITHUB_REF_NAME" \
-              https://git.vedaru.cn/Vedaru/Hyprland.git "$RUNNER_TEMP/src" \
-              2>&1 | tee -a "$log"
-          rc=${PIPESTATUS[0]}
-          if [ "$rc" -eq 0 ]; then
-            bash "$RUNNER_TEMP/src/.forgejo/rebuild-hyprbuntu.sh" 2>&1 | tee -a "$log"
-            rc=${PIPESTATUS[0]}
-          fi
+          # Everything this step does, from the first line, goes through the
+          # tee. The opening environment dump is the one thing that survives
+          # if nothing else here works, and it is what tells a reader which
+          # runner this actually landed on.
+          {
+            echo "== job start $(date -Is 2>/dev/null) =="
+            echo "host=$(hostname 2>/dev/null) user=$(id -un 2>/dev/null) uid=$(id -u 2>/dev/null)"
+            echo "pwd=$PWD"
+            echo "RUNNER_TEMP=${RUNNER_TEMP:-<unset>} GITHUB_REF_NAME=${GITHUB_REF_NAME:-<unset>}"
+            echo "token_len=${#FORGEJO_TOKEN}"
+            for t in git curl zstd cmake ninja apt-get docker; do
+              printf 'tool %-9s %s\n' "$t" "$(command -v "$t" 2>/dev/null || echo '<missing>')"
+            done
 
-          # Publish the log where it can actually be read. A 409 means the slot
-          # already holds a file, so it is replaced with a DELETE-then-PUT.
+            # No actions/checkout: the default action source is data.forgejo.org,
+            # which this runner cannot reach. Clone this repo over git.vedaru.cn
+            # instead, with the same per-command credential helper and IPv4 pin
+            # the rest of this repo's CI uses (Cloudflare completes the TCP
+            # handshake on its IPv6 addresses and then drops the TLS ClientHello).
+            ip=$(getent ahostsv4 git.vedaru.cn | awk 'NR==1 {print $1}')
+            echo "git.vedaru.cn ipv4=$ip"
+            helper='!f() { echo "username=x"; printf "password=%s\n" "$FORGEJO_TOKEN"; }; f'
+            rm -rf "${RUNNER_TEMP:-/tmp}/src"
+            echo "== cloning this repo =="
+            git -c credential.helper= -c "credential.helper=$helper" \
+                -c "http.curloptResolve=git.vedaru.cn:443:$ip" \
+                clone --quiet --depth 1 --branch "$GITHUB_REF_NAME" \
+                https://git.vedaru.cn/Vedaru/Hyprland.git "${RUNNER_TEMP:-/tmp}/src"
+            rc=$?
+            echo "clone rc=$rc"
+            if [ "$rc" -eq 0 ]; then
+              echo "== running rebuild-hyprbuntu.sh =="
+              bash "${RUNNER_TEMP:-/tmp}/src/.forgejo/rebuild-hyprbuntu.sh"
+              rc=$?
+              echo "script rc=$rc"
+            fi
+            echo "== job end $(date -Is 2>/dev/null) =="
+          } 2>&1 | tee -a "$log"
+          # The pipeline's own exit code is tee's, which is always 0, so the
+          # script's rc has to be carried out by hand for the job to report it.
+          exit "$(grep -a '^script rc=' "$log" | tail -1 | grep -ao '[0-9]*$' || echo 1)"
+
+      - name: Publish the build log
+        # always(): this step is the reason the previous one is diagnosable, so
+        # it must run after a failure too. Runs on the same runner, so the file
+        # the previous step wrote is still there.
+        if: always()
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          set -uo pipefail
+          log=/tmp/hyprbuntu-build.log
+          [ -f "$log" ] || printf 'the build step produced no log at %s\n' "$log" > "$log"
           slot="https://git.vedaru.cn/api/packages/Vedaru/generic/hyprbuntu-ci/build/build.log"
           code=$(curl -4 -sS -o /dev/null -w '%{http_code}' -X PUT \
                       -H "Authorization: token $FORGEJO_TOKEN" \
@@ -72,4 +109,3 @@ jobs:
                         --upload-file "$log" "$slot") || true
           fi
           echo "build log -> hyprbuntu-ci/build/build.log (HTTP $code)"
-          exit "$rc"
