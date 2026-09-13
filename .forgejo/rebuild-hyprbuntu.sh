@@ -57,8 +57,23 @@ say "user: $(id -un) uid=$(id -u)  cpus: $(nproc 2>/dev/null || echo ?)  src: $S
 # 1. Toolchain. The runner image is minimal (no zstd, which is what killed the
 #    previous job), so everything the build needs is installed here.
 #
-#    This list is what the *machine* has, and two entries in it are not
-#    optional even though the build only mentions them indirectly:
+#    This list is meant to be the machine's. Its source of truth is the
+#    `install_hyprwm_package Hyprland` block in dot_local/bin/
+#    executable_setup-hyprbuntu.sh, which names the apt packages the laptop's
+#    own Hyprland build uses; everything else in the block below is the
+#    toolchain plus the pkg-config deps CMakeLists.txt's `deps` call requires.
+#    When that block changes, diff it against this one.
+#
+#    Four entries are easy to leave out because the build only mentions them
+#    indirectly, and each was a separate failed run before it was added:
+#
+#      * libglaze-dev. Without it find_package(glaze) is QUIET-false and
+#        CMakeLists.txt:136 falls into FetchContent, which clones
+#        github.com/stephenberry/glaze.git -- the one host this repo exists to
+#        avoid, and one this runner cannot reach at all. The build would stop
+#        there, but only after trying the network. glaze is header-only and,
+#        on the machine, a plain system package outside the bundle, so CI has
+#        to install it too.
 #
 #      * glslang-tools. glslang-dev ships the CMake config, and that config
 #        eagerly checks that the imported target glslang::glslang-standalone
@@ -69,15 +84,22 @@ say "user: $(id -un) uid=$(id -u)  cpus: $(nproc 2>/dev/null || echo ?)  src: $S
 #        does not exist" and configure stops.
 #
 #      * libudis86-dev. Two reasons it has to be the apt package rather than
-#        the in-tree submodule. One, the submodule points at github.com and
-#        this runner has no proxy, so the clone leaves subprojects/udis86 an
-#        empty directory and CMake's fallback add_subdirectory() dies on the
-#        missing CMakeLists.txt. Two, the machine links Hyprland against the
-#        shared libudis86 (pkg-config finds 1.7.2 there), so installing the
-#        same package keeps the CI binary's linkage identical to the one the
-#        bundle was made from, instead of silently switching it to a static
-#        copy. Version 0+20221013-1.1build1 is what 26.04 carries, and it is
-#        the same version the laptop has.
+#        the in-tree submodule. One, the submodule points at github.com, so
+#        the clone leaves subprojects/udis86 an empty directory and CMake's
+#        fallback add_subdirectory() dies on the missing CMakeLists.txt. Two,
+#        the machine links Hyprland against the shared libudis86 (pkg-config
+#        finds 1.7.2 there), so installing the same package keeps the CI
+#        binary's linkage identical to the one the bundle was made from,
+#        instead of silently switching it to a static copy. Version
+#        0+20221013-1.1build1 is what 26.04 carries: the machine's version.
+#
+#      * liblua5.5-dev, not liblua5.4-dev. CMakeLists.txt:291 searches
+#        `lua55 lua5.5 ... lua>=5.5 lua<5.6`, so a 5.4 package satisfies none
+#        of them. The machine runs liblua5.5-dev (its lua.pc reports 5.5.0).
+#
+#    libxcb-render0-dev is deliberately absent: it is a dependency of
+#    libcairo2-dev (also below), so it arrives transitively, which is also how
+#    the machine gets it.
 # ---------------------------------------------------------------------------
 if command -v apt-get >/dev/null; then
   say "== installing the build toolchain (apt) =="
@@ -89,13 +111,15 @@ if command -v apt-get >/dev/null; then
     libxkbcommon-dev uuid-dev libcairo2-dev libpango1.0-dev libpixman-1-dev \
     libxcursor-dev libdrm-dev libinput-dev libeis-dev libgbm-dev \
     libglib2.0-dev libmuparser-dev liblcms2-dev glslang-dev glslang-tools \
+    libglaze-dev \
     libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev \
     libseat-dev libdisplay-info-dev libliftoff-dev libudev-dev \
     libudis86-dev \
     libtomlplusplus-dev libwayland-dev libxcb1-dev libxcb-composite0-dev \
     libxcb-ewmh-dev libxcb-icccm4-dev libxcb-keysyms1-dev libxcb-render-util0-dev \
-    libxcb-res0-dev libxcb-xinput-dev libxcb-xkb-dev libxkbcommon-x11-dev \
-    libpam0g-dev libsystemd-dev libgbm-dev liblua5.4-dev \
+    libxcb-res0-dev libxcb-xfixes0-dev libxcb-errors-dev \
+    libxcb-xinput-dev libxcb-xkb-dev libxkbcommon-x11-dev \
+    libpam0g-dev libsystemd-dev libgbm-dev liblua5.5-dev \
     || die "apt-get install failed"
 else
   die "no apt-get on this runner ($(command -v apk pacman dnf 2>/dev/null || echo 'no package manager')); this script only supports apt-based images"
