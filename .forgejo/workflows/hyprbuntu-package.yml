@@ -71,24 +71,32 @@ jobs:
       - name: Rebuild Hyprland and republish the bundle
         env:
           FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+          # This job runs on the Forgejo server itself, in a container that
+          # shares its network namespace (the server runner's
+          # `container.network: host`), so the instance is on the loopback
+          # address and neither the clone nor the upload needs the edge.
+          #
+          # The upload is why this matters. The bundle is ~60 MB, and pushing
+          # it out to Cloudflare and back to the same host answered 524 in run
+          # 207 -- after the replace-DELETE had already removed the previous
+          # tarball, leaving the version with no bundle at all. Loopback has no
+          # 100-second origin timeout to hit.
+          FORGEJO_URL: http://127.0.0.1:3000
         run: |
           set -uo pipefail
           echo "host=$(hostname) user=$(id -un) uid=$(id -u) pwd=$PWD"
           echo "distro: $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}")"
+          echo "forgejo: $FORGEJO_URL"
 
           # No actions/checkout: the default action source is data.forgejo.org,
-          # which this runner cannot reach. Clone this repo over git.vedaru.cn
-          # instead, with the same per-command credential helper and IPv4 pin
-          # the rest of this repo's CI uses (Cloudflare completes the TCP
-          # handshake on its IPv6 addresses and then drops the TLS ClientHello).
-          ip=$(getent ahostsv4 git.vedaru.cn | awk 'NR==1 {print $1}')
-          echo "git.vedaru.cn ipv4=$ip"
+          # which this runner cannot reach. Clone this repo from the local
+          # Forgejo instead, with the same per-command credential helper the
+          # rest of this repo's CI uses, so the token stays out of .git/config.
           helper='!f() { echo "username=x"; printf "password=%s\n" "$FORGEJO_TOKEN"; }; f'
           rm -rf "${RUNNER_TEMP:-/tmp}/src"
           git -c credential.helper= -c "credential.helper=$helper" \
-              -c "http.curloptResolve=git.vedaru.cn:443:$ip" \
               clone --quiet --depth 1 --branch "$GITHUB_REF_NAME" \
-              https://git.vedaru.cn/Vedaru/Hyprland.git "${RUNNER_TEMP:-/tmp}/src" \
+              "$FORGEJO_URL/Vedaru/Hyprland.git" "${RUNNER_TEMP:-/tmp}/src" \
               || { echo "clone of this repository failed"; exit 1; }
 
           bash "${RUNNER_TEMP:-/tmp}/src/.forgejo/rebuild-hyprbuntu.sh"

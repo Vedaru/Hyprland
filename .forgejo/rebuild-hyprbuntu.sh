@@ -29,7 +29,13 @@ set -uo pipefail
 
 VER="0.56.2-vedaru1"
 OWNER="Vedaru"
-URL="https://git.vedaru.cn"
+# Where the registry is. The default is the public name, but the Hyprland job
+# runs *on* the Forgejo server, in a container sharing its network namespace,
+# so the workflow points this at http://127.0.0.1:3000 there. The tarball is
+# ~60 MB, and putting it out through the Cloudflare edge and back to the same
+# host is what answered 524 in run 207 -- after the replace-DELETE had already
+# removed the previous bundle. Over loopback there is no edge to time out.
+URL="${FORGEJO_URL:-https://git.vedaru.cn}"
 PKG="hyprbuntu"
 SRC="${SRC:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
 NEWROOT="/tmp/hyprbuntu-new"      # DESTDIR for the Hyprland install
@@ -314,16 +320,41 @@ say "  $tarball_name: $(stat -c '%s' "$out") bytes"
 #    already there and is replaced with a DELETE-then-PUT.
 # ---------------------------------------------------------------------------
 upload() {
-  local file="$1" always="${2:-false}" name code
+  local file="$1" name attempt code del
   name="$(basename "$file")"
   local url="$URL/api/packages/$OWNER/generic/$PKG/$VER/$name"
-  code=$(curl -4 -sS -o /tmp/upload.out -w '%{http_code}' -m 900 -X PUT \
-              -H "Authorization: token $TOKEN" --upload-file "$file" "$url") || true
-  if [ "$code" = "409" ]; then
-    curl -4 -sS -o /dev/null -X DELETE -H "Authorization: token $TOKEN" "$url" || true
+  # Retried: the tunnel drops transfers (curl reports 000) and the edge in
+  # front of Forgejo answers 502 in bursts, most often on the tarball. A 409
+  # that follows a successful DELETE is the same class -- the file is still
+  # there regardless, so the whole replace is retried rather than reported.
+  # The 520-524 range is Cloudflare's own: 524 is the one that cost run 207 its
+  # upload, an origin timeout on the 60 MB PUT, and it arrives here rather than
+  # from Forgejo, so it is retried with the rest.
+  for attempt in 1 2 3 4 5; do
     code=$(curl -4 -sS -o /tmp/upload.out -w '%{http_code}' -m 900 -X PUT \
                 -H "Authorization: token $TOKEN" --upload-file "$file" "$url") || true
-  fi
+    if [ "$code" = "409" ]; then
+      # The registry is immutable per version, so the existing file has to go
+      # first. The DELETE's own status is checked: one the edge dropped leaves
+      # the file in place, and the PUT below then answers 409 again.
+      del=$(curl -4 -sS -o /tmp/upload-del.out -w '%{http_code}' -m 300 -X DELETE \
+                 -H "Authorization: token $TOKEN" "$url") || true
+      if [ "$del" != "204" ] && [ "$del" != "200" ]; then
+        say "  ... $name: replace DELETE -> HTTP $del, retry $attempt/5"
+        sleep 2
+        continue
+      fi
+      code=$(curl -4 -sS -o /tmp/upload.out -w '%{http_code}' -m 900 -X PUT \
+                  -H "Authorization: token $TOKEN" --upload-file "$file" "$url") || true
+    fi
+    case "$code" in
+      000|409|502|503|504|520|521|522|523|524)
+        say "  ... $name: HTTP $code, retry $attempt/5"
+        sleep 2
+        ;;
+      *) break ;;
+    esac
+  done
   # Cloudflare answers any body over ~100 MB with 413 before Forgejo sees it.
   if [ "$code" != "201" ] && [ "$code" != "200" ]; then
     say "  FAIL $name -> HTTP $code"; sed 's/^/    /' /tmp/upload.out 2>/dev/null; return 1
@@ -333,8 +364,8 @@ upload() {
 
 say "== publishing $PKG $VER =="
 upload "$out" || die "the bundle upload failed"
-upload "$WORK/$PKG-$VER/MANIFEST.tsv" always || die "MANIFEST.tsv upload failed"
-upload "$WORK/$PKG-$VER/SHA256SUMS" always || die "SHA256SUMS upload failed"
+upload "$WORK/$PKG-$VER/MANIFEST.tsv" || die "MANIFEST.tsv upload failed"
+upload "$WORK/$PKG-$VER/SHA256SUMS" || die "SHA256SUMS upload failed"
 
 # ---------------------------------------------------------------------------
 # 8. Keep one version: the one just published. Every other version of the
