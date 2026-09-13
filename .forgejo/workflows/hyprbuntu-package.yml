@@ -97,11 +97,25 @@ jobs:
           echo "probe log -> hyprbuntu-ci/build/probe.log (HTTP $code)"
 
   package:
+    # `ubuntu-latest` is the server runner, not the laptop: the laptop runner
+    # carries `vedaru-laptop` (see the chezmoi vendored-packages workflow) so
+    # that a job which needs a container cannot be scheduled onto its host
+    # backend, where `container:` fails before the first step runs.
     runs-on: ubuntu-latest
-    # A glibc base image: the bundle's libraries and the whole build are glibc.
+    # A glibc base image: the bundle's libraries and the whole build are glibc,
+    # so the runner's default Alpine image cannot link them. ubuntu:24.04 is
+    # bare -- it has neither git nor curl -- so the first step installs the two
+    # tools the clone below needs before anything can fetch this repository.
     container:
       image: ubuntu:24.04
     steps:
+      - name: Install git and curl into the container
+        run: |
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -y
+          apt-get install -y --no-install-recommends git curl ca-certificates
+
       - name: Rebuild Hyprland and republish the bundle
         env:
           FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
