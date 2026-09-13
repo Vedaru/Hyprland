@@ -2161,9 +2161,11 @@ void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
 
     bool renderCursor = true;
 
-    if (pMonitor->m_solitaryClient && (!finalDamage.empty() || *PSOLDAMAGE))
+    if (pMonitor->m_solitaryClient && (!finalDamage.empty() || *PSOLDAMAGE)) {
         renderWindow(pMonitor->m_solitaryClient.lock(), pMonitor, NOW, false, RENDER_PASS_MAIN /* solitary = no popups */);
-    else if (!finalDamage.empty()) {
+        // IME popups still belong above the solitary client (the else branch below draws them too).
+        renderIME(pMonitor, NOW, {0, 0, sc<int>(pMonitor->m_pixelSize.x), sc<int>(pMonitor->m_pixelSize.y)});
+    } else if (!finalDamage.empty()) {
         if (pMonitor->isMirror()) {
             blend(false);
             renderMirrored();
