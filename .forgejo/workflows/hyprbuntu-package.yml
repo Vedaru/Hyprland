@@ -26,6 +26,15 @@
 # step, the log would be destroyed with it, which is exactly how a failure
 # becomes invisible. The two steps share /tmp on the runner, so the first
 # writes and the second reads the same file no matter which of them fails.
+#
+# The package job asks for ubuntu:24.04 because the runner's default image is
+# Alpine. Hyprland is glibc C++ and is linked against the glibc .so files in
+# the published bundle, so a musl image cannot build it -- not for want of
+# apt, but because those libraries cannot be linked there at all. The probe
+# job finds out whether that image is pullable before the package job depends
+# on it, and is deliberately a separate job: if the pull fails the package
+# job's container never starts and it uploads no log, and the probe log is
+# then the only thing that says why.
 
 name: Rebuild hyprbuntu bundle
 
@@ -35,8 +44,63 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Answers "what can this runner do" in one place, in the runner's own
+  # default image, so the answer survives the package job failing to start.
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe the runner environment
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          set -uo pipefail
+          log=/tmp/probe.log
+          {
+            echo "== probe $(date -Is 2>/dev/null) =="
+            echo "host=$(hostname 2>/dev/null) user=$(id -un 2>/dev/null) uid=$(id -u 2>/dev/null) pwd=$PWD"
+            echo "GITHUB_REF_NAME=${GITHUB_REF_NAME:-<unset>} token_len=${#FORGEJO_TOKEN}"
+            echo "--- /etc/os-release ---"
+            cat /etc/os-release 2>/dev/null
+            echo "--- pid1=$(cat /proc/1/comm 2>/dev/null) ---"
+            echo "--- tools ---"
+            for t in apk apt-get dnf pacman docker podman zstd cmake ninja gcc; do
+              printf '  %-9s %s\n' "$t" "$(command -v "$t" 2>/dev/null || echo '<missing>')"
+            done
+            echo "--- apk repositories ---"
+            cat /etc/apk/repositories 2>/dev/null
+            echo "--- container sockets ---"
+            ls -la /var/run/docker.sock /run/podman/podman.sock 2>/dev/null || echo "  none"
+            echo "--- egress: https GET, 6s timeout ---"
+            for h in registry-1.docker.io auth.docker.io dl-cdn.alpinelinux.org \
+                     deb.debian.org archive.ubuntu.com github.com codeberg.org git.vedaru.cn; do
+              code=$(curl -4 -sS -o /dev/null -m 6 -w '%{http_code}' "https://$h/v2/" 2>/dev/null)
+              rc=$?
+              if [ "$rc" -eq 0 ]; then
+                printf '  %-26s http=%s\n' "$h" "$code"
+              else
+                printf '  %-26s curl rc=%s\n' "$h" "$rc"
+              fi
+            done
+          } > "$log" 2>&1
+          cat "$log"
+
+          slot="https://git.vedaru.cn/api/packages/Vedaru/generic/hyprbuntu-ci/build/probe.log"
+          code=$(curl -4 -sS -o /dev/null -w '%{http_code}' -X PUT \
+                      -H "Authorization: token $FORGEJO_TOKEN" \
+                      --upload-file "$log" "$slot") || true
+          if [ "$code" = "409" ]; then
+            curl -4 -sS -o /dev/null -X DELETE -H "Authorization: token $FORGEJO_TOKEN" "$slot" || true
+            code=$(curl -4 -sS -o /dev/null -w '%{http_code}' -X PUT \
+                        -H "Authorization: token $FORGEJO_TOKEN" \
+                        --upload-file "$log" "$slot") || true
+          fi
+          echo "probe log -> hyprbuntu-ci/build/probe.log (HTTP $code)"
+
   package:
     runs-on: ubuntu-latest
+    # A glibc base image: the bundle's libraries and the whole build are glibc.
+    container:
+      image: ubuntu:24.04
     steps:
       - name: Rebuild Hyprland and republish the bundle
         env:
@@ -55,7 +119,7 @@ jobs:
             echo "pwd=$PWD"
             echo "RUNNER_TEMP=${RUNNER_TEMP:-<unset>} GITHUB_REF_NAME=${GITHUB_REF_NAME:-<unset>}"
             echo "token_len=${#FORGEJO_TOKEN}"
-            for t in git curl zstd cmake ninja apt-get docker; do
+            for t in git curl zstd cmake ninja apt-get; do
               printf 'tool %-9s %s\n' "$t" "$(command -v "$t" 2>/dev/null || echo '<missing>')"
             done
 
@@ -89,8 +153,8 @@ jobs:
 
       - name: Publish the build log
         # always(): this step is the reason the previous one is diagnosable, so
-        # it must run after a failure too. Runs on the same runner, so the file
-        # the previous step wrote is still there.
+        # it must run after a failure too. Runs in the same container, so the
+        # file the previous step wrote is still there.
         if: always()
         env:
           FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
