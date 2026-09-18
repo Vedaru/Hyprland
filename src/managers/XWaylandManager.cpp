@@ -3,6 +3,7 @@
 #include "../desktop/state/FocusState.hpp"
 #include "../config/ConfigValue.hpp"
 #include "../output/Monitor.hpp"
+#include "../protocols/XDGDialog.hpp"
 #include "../protocols/XDGShell.hpp"
 #include "../protocols/core/Compositor.hpp"
 #include "../xwayland/XWayland.hpp"
@@ -137,8 +138,9 @@ bool CHyprXWaylandManager::shouldBeFloated(PHLWINDOW pWindow, bool pending) {
         if (!pWindow->m_xdgSurface || !pWindow->m_xdgSurface->m_toplevel)
             return false;
 
-        const auto PSTATE = pending ? &pWindow->m_xdgSurface->m_toplevel->m_pending : &pWindow->m_xdgSurface->m_toplevel->m_current;
-        if (pWindow->m_xdgSurface->m_toplevel->m_parent ||
+        const auto PSTATE  = pending ? &pWindow->m_xdgSurface->m_toplevel->m_pending : &pWindow->m_xdgSurface->m_toplevel->m_current;
+        const auto PDIALOG = pWindow->m_xdgSurface->m_toplevel->m_dialog;
+        if (pWindow->m_xdgSurface->m_toplevel->m_parent || (PDIALOG && PDIALOG->modal) ||
             (PSTATE->minSize.x != 0 && PSTATE->minSize.y != 0 && (PSTATE->minSize.x == PSTATE->maxSize.x || PSTATE->minSize.y == PSTATE->maxSize.y)))
             return true;
     }
