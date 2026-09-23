@@ -1127,8 +1127,14 @@ static std::string dispatchRequest(eHyprCtlOutputFormat format, std::string in) 
     // get rid of the dispatch keyword
     in = in.substr(in.find_first_of(' ') + 1);
 
-    if (Config::mgr()->type() == Config::CONFIG_LUA) {
-        // For lua, this is just a wrapper for `eval("hl.dispatch(in)")
+    const auto DISPATCHSTR = in.substr(0, in.find_first_of(' '));
+
+    // The classic `dispatch <dispatcher> <arg>` form stays valid under the lua
+    // config manager: it is what the IPC protocol documents and what external
+    // clients speak (waybar's workspace buttons send "dispatch workspace 3",
+    // for one). Only input whose first word is not a known dispatcher is taken
+    // as the lua shorthand for `eval("hl.dispatch(in)")`.
+    if (Config::mgr()->type() == Config::CONFIG_LUA && !g_pKeybindManager->m_dispatchers.contains(DISPATCHSTR)) {
         std::string evalStr = std::format("return hl.dispatch({})", in);
         auto        luaMgr  = dynamicPointerCast<Config::Lua::CConfigManager>(WP<Config::IConfigManager>(Config::mgr()));
         auto        ret     = luaMgr->eval(evalStr).value_or("ok");
@@ -1136,11 +1142,9 @@ static std::string dispatchRequest(eHyprCtlOutputFormat format, std::string in) 
         if (ret.starts_with("ok") || in.contains("(") /* this likely means the user is passing a valid lua dispatch string */)
             return ret;
 
-        // the user likely is trying to dispatch old hyprlang stuff via lua, let them know
+        // the user likely is trying to dispatch something that is not a dispatcher, let them know
         return ret + "\n\n → Note: dispatch in lua is a shorthand for hl.dispatch(...), your syntax might need to be updated.";
     }
-
-    const auto DISPATCHSTR = in.substr(0, in.find_first_of(' '));
 
     auto       DISPATCHARG = std::string();
     if (sc<int>(in.find_first_of(' ')) != -1)
