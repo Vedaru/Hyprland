@@ -1415,8 +1415,25 @@ void CWindow::onUpdateState() {
                 Fullscreen::controller()->setFullscreenMode(m_self.lock(), std::nullopt, Fullscreen::FSMODE_FULLSCREEN);
             else {
                 // If window's fullscreen, un-fullscreen it. if it's not FS, let it keep its current FS mode
-                if (Fullscreen::controller()->getFullscreenModes(m_self.lock()).client == Fullscreen::FSMODE_FULLSCREEN)
-                    Fullscreen::controller()->setFullscreenMode(m_self.lock(), std::nullopt, Fullscreen::FSMODE_NONE);
+                if (Fullscreen::controller()->getFullscreenModes(m_self.lock()).client == Fullscreen::FSMODE_FULLSCREEN) {
+                    // A window that was mapped asking to cover the whole output keeps doing so even once the
+                    // client lets go of its own fullscreen state: it still cannot be given the output through
+                    // the work area, so dropping to the layout would leave it overflowing the reserved zones
+                    // (e.g. a bar's). Hand the client back its windowed state, but hold the window itself at
+                    // internal fullscreen. m_wholeOutputCovered gates this to those windows only, so an
+                    // ordinary window the user put into fullscreen falls back to the layout as before.
+                    if (demandsWholeOutput() || (m_wholeOutputCovered && coversWholeOutput())) {
+                        m_ruleApplicator->syncFullscreenOverride(Desktop::Types::COverridableVar(false, Desktop::Types::PRIORITY_SET_PROP));
+                        Fullscreen::controller()->setFullscreenMode(m_self.lock(), Fullscreen::FSMODE_FULLSCREEN, Fullscreen::FSMODE_NONE);
+
+                        // internal and client modes differ on purpose from here on; let the sync know, so it
+                        // doesn't force them back together on the next update.
+                        const auto NEW_FS_MODES = Fullscreen::controller()->getFullscreenModes(m_self.lock());
+                        m_ruleApplicator->syncFullscreenOverride(
+                            Desktop::Types::COverridableVar(NEW_FS_MODES.internal == NEW_FS_MODES.client, Desktop::Types::PRIORITY_SET_PROP));
+                    } else
+                        Fullscreen::controller()->setFullscreenMode(m_self.lock(), std::nullopt, Fullscreen::FSMODE_NONE);
+                }
             }
         }
 
@@ -2231,21 +2248,21 @@ void CWindow::mapWindow() {
         // fullscreen. Tiling or floating them would shrink them to the work area, leaving the
         // exclusive zones reserved at the edges (e.g. for bars) uncovered, and those clients
         // often ignore the smaller configure anyway. Honour such a request as internal
-        // fullscreen, but only on outputs that actually reserve exclusive zones: without them a
-        // tiled window already covers the whole output, and a client that merely echoes our own
-        // initial configure (which is the work area size) must not be mistaken for one that
-        // demands the whole output. `suppress_event fullscreen`, a `fullscreen`/`fullscreen_state`
-        // rule, an explicit `float` rule and a `size` rule all take precedence.
-        const auto COVERMONITOR = m_monitor.lock();
-        const bool HASRESERVED  = COVERMONITOR && (COVERMONITOR->m_reservedArea.left() > 0 || COVERMONITOR->m_reservedArea.right() > 0 ||
-                                                  COVERMONITOR->m_reservedArea.top() > 0 || COVERMONITOR->m_reservedArea.bottom() > 0);
-        if (m_target && COVERMONITOR && HASRESERVED && !requestedInternalFSMode.has_value() && !requestedClientFSMode.has_value() && !requestedFSState.has_value() &&
-            !(m_suppressedEvents & Desktop::View::SUPPRESS_FULLSCREEN) && !m_ruleApplicator->static_.floating.value_or(false) && !m_ruleApplicator->static_.size.has_value()) {
-            if (const auto DESIRED = m_target->desiredGeometry(); DESIRED) {
-                const auto OUTPUT = COVERMONITOR->logicalBox().size();
-                if (DESIRED->size.x >= OUTPUT.x && DESIRED->size.y >= OUTPUT.y)
-                    requestedInternalFSMode = Fullscreen::FSMODE_FULLSCREEN;
-            }
+        // fullscreen, but only where mayCoverWholeOutput() allows it (see there).
+        //
+        // Two independent protocol-level triggers reach it: the client's own size hints
+        // (demandsWholeOutput(), i.e. it declares it cannot be smaller than the output) and the
+        // geometry it asked to be configured at (>= the whole output).
+        if (m_target && (demandsWholeOutput() || coversWholeOutput())) {
+            // Remember that this window asked to cover its whole output, whether or not it also
+            // requested fullscreen itself: a client that starts fullscreen and later drops it is
+            // exactly the "windowed fullscreen" game this promotion exists for.
+            m_wholeOutputCovered = true;
+
+            // A pre-map fullscreen request (m_wantsInitialFullscreen) or a rule already decided the
+            // mode; those win. Otherwise the promotion itself makes it internal fullscreen.
+            if (!requestedInternalFSMode.has_value() && !requestedClientFSMode.has_value() && !requestedFSState.has_value())
+                requestedInternalFSMode = Fullscreen::FSMODE_FULLSCREEN;
         }
 
         if (!m_ruleApplicator->static_.group.empty()) {
@@ -2942,6 +2959,64 @@ std::optional<Vector2D> CWindow::maxSize() {
         maxSize.y = NO_MAX_SIZE_LIMIT;
 
     return maxSize;
+}
+
+bool CWindow::mayCoverWholeOutput() {
+    const auto MONITOR = m_monitor.lock();
+    if (!MONITOR)
+        return false;
+
+    // Without an exclusive zone to cover there is nothing to promote this window for: a tiled window
+    // already spans the whole output, and a client that merely echoes our own initial configure
+    // (which is the work area size) must not be mistaken for one that wants the whole output.
+    const bool HASRESERVED = MONITOR->m_reservedArea.left() > 0 || MONITOR->m_reservedArea.right() > 0 || MONITOR->m_reservedArea.top() > 0 ||
+                             MONITOR->m_reservedArea.bottom() > 0;
+    if (!HASRESERVED)
+        return false;
+
+    if (m_suppressedEvents & SUPPRESS_FULLSCREEN)
+        return false;
+
+    // An explicit rule on this window wins over the inference; otherwise only the client's own
+    // protocol-level state is consulted, never its class, title or executable name.
+    if (m_ruleApplicator->static_.floating.value_or(false) || m_ruleApplicator->static_.size.has_value() || m_ruleApplicator->static_.fullscreen.value_or(false) ||
+        m_ruleApplicator->static_.maximize.value_or(false) || m_ruleApplicator->static_.fullscreenStateClient.has_value() ||
+        m_ruleApplicator->static_.fullscreenStateInternal.has_value())
+        return false;
+
+    return true;
+}
+
+bool CWindow::demandsWholeOutput() {
+    if (!mayCoverWholeOutput())
+        return false;
+
+    const auto MINSIZE = minSize();
+    if (!MINSIZE)
+        return false;
+
+    const auto MONITOR = m_monitor.lock();
+    if (!MONITOR)
+        return false;
+
+    const auto OUTPUT = MONITOR->logicalBox().size();
+    return MINSIZE->x >= OUTPUT.x && MINSIZE->y >= OUTPUT.y;
+}
+
+bool CWindow::coversWholeOutput() {
+    if (!mayCoverWholeOutput() || !m_target)
+        return false;
+
+    const auto MONITOR = m_monitor.lock();
+    if (!MONITOR)
+        return false;
+
+    const auto DESIRED = m_target->desiredGeometry();
+    if (!DESIRED)
+        return false;
+
+    const auto OUTPUT = MONITOR->logicalBox().size();
+    return DESIRED->size.x >= OUTPUT.x && DESIRED->size.y >= OUTPUT.y;
 }
 
 SP<Layout::ITarget> CWindow::layoutTarget() {

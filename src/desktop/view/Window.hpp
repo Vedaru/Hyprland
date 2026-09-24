@@ -190,6 +190,12 @@ namespace Desktop::View {
         bool      m_wantsInitialFullscreen        = false;
         MONITORID m_wantsInitialFullscreenMonitor = MONITOR_INVALID;
 
+        // Set when the window was mapped asking to cover its whole output (see mayCoverWholeOutput()).
+        // Only such windows keep their internal fullscreen when the client drops its own fullscreen
+        // state; the flag is what separates them from an ordinary window the user put into fullscreen
+        // and then left (a browser on F11/Esc), which must fall back to the layout.
+        bool m_wholeOutputCovered = false;
+
         // bitfield suppressEvents
         uint64_t m_suppressedEvents = SUPPRESS_NONE;
 
@@ -424,6 +430,18 @@ namespace Desktop::View {
         std::optional<Vector2D>           calculateExpression(const Math::SExpressionVec2& expr);
         std::optional<Vector2D>           minSize();
         std::optional<Vector2D>           maxSize();
+        /// Returns `true` if this window may be promoted to internal fullscreen to cover its whole
+        /// output: the output actually reserves exclusive zones to cover, and neither suppression
+        /// nor an explicit window rule says otherwise.
+        bool                              mayCoverWholeOutput();
+        /// Returns `true` if this window's client has declared that it cannot be smaller than its whole
+        /// output, i.e. that it wants to cover the output rather than to sit inside its work area.
+        /// Keyed purely off the protocol-level size hints, never off window identity.
+        bool                              demandsWholeOutput();
+        /// Returns `true` if this window currently covers its whole output by its own requested
+        /// geometry, i.e. the size it asked to be configured at is at least the output size.
+        /// Keyed purely off the protocol-level geometry, never off window identity.
+        bool                              coversWholeOutput();
         // Returns the highest level target of a window
         // e.g. if the window is a part of a group, this returns the window group target
         SP<Layout::ITarget> layoutTarget();
