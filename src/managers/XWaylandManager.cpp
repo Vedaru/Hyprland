@@ -140,8 +140,11 @@ bool CHyprXWaylandManager::shouldBeFloated(PHLWINDOW pWindow, bool pending) {
 
         const auto PSTATE  = pending ? &pWindow->m_xdgSurface->m_toplevel->m_pending : &pWindow->m_xdgSurface->m_toplevel->m_current;
         const auto PDIALOG = pWindow->m_xdgSurface->m_toplevel->m_dialog;
+        // Only a window that pins *both* axes to the same size cannot be tiled, so only then is it
+        // floated; with a single axis pinned the layout can still resize the other one. Matches the
+        // X11 branch above.
         if (pWindow->m_xdgSurface->m_toplevel->m_parent || (PDIALOG && PDIALOG->modal) ||
-            (PSTATE->minSize.x != 0 && PSTATE->minSize.y != 0 && (PSTATE->minSize.x == PSTATE->maxSize.x || PSTATE->minSize.y == PSTATE->maxSize.y)))
+            (PSTATE->minSize.x != 0 && PSTATE->minSize.y != 0 && PSTATE->minSize.x == PSTATE->maxSize.x && PSTATE->minSize.y == PSTATE->maxSize.y))
             return true;
     }
 
