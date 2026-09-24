@@ -317,10 +317,12 @@ TEST_CASE(toplevelFloat) {
     OK(getFromSocket("/dispatch hl.dsp.focus({ monitor = 'HEADLESS-2' })"));
 
     // Only one axis is fixed: the layout can still resize the other one, so the window is tiled.
+    // The max must still span the output, otherwise the tiling algorithm floats it first (its own
+    // "max size smaller than the tile" bail-out) and shouldBeFloated() never gets a say.
     {
         std::optional<CClient> client;
         try {
-            client.emplace(std::vector<std::string>{"--hint", "400", "300", "400", "900"});
+            client.emplace(std::vector<std::string>{"--hint", "1920", "300", "1920", "2400"});
         } catch (const std::exception& e) { FAIL_TEST("Couldn't start the toplevel client: {}", e.what()); }
 
         Tests::sync();
