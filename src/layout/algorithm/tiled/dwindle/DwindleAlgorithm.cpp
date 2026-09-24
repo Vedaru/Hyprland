@@ -522,7 +522,7 @@ std::optional<Vector2D> CDwindleAlgorithm::predictSizeForNewTarget() {
     SDwindleNodeData node;
 
     if (!candidate)
-        return Desktop::focusState()->monitor()->m_size;
+        return m_parent->space()->workArea().size();
     else {
         const auto PNODE = getNodeFromWindow(candidate);
 

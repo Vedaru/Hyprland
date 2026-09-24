@@ -889,7 +889,7 @@ std::optional<Vector2D> CMasterAlgorithm::predictSizeForNewTarget() {
     const int NODES = getNodesNo();
 
     if (NODES <= 0)
-        return Desktop::focusState()->monitor()->m_size;
+        return m_parent->space()->workArea().size();
 
     const auto MASTER = getMasterNode();
     if (!MASTER) // wtf

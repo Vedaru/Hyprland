@@ -2225,6 +2225,29 @@ void CWindow::mapWindow() {
         if (m_ruleApplicator->static_.maximize.value_or(false))
             requestedInternalFSMode = Fullscreen::FSMODE_MAXIMIZED;
 
+        // A client that asks for a toplevel at least as large as its whole output is asking to
+        // cover the output, not to sit in it. This is what games in a borderless "windowed
+        // fullscreen" mode do: they size their window to the monitor instead of requesting
+        // fullscreen. Tiling or floating them would shrink them to the work area, leaving the
+        // exclusive zones reserved at the edges (e.g. for bars) uncovered, and those clients
+        // often ignore the smaller configure anyway. Honour such a request as internal
+        // fullscreen, but only on outputs that actually reserve exclusive zones: without them a
+        // tiled window already covers the whole output, and a client that merely echoes our own
+        // initial configure (which is the work area size) must not be mistaken for one that
+        // demands the whole output. `suppress_event fullscreen`, a `fullscreen`/`fullscreen_state`
+        // rule, an explicit `float` rule and a `size` rule all take precedence.
+        const auto COVERMONITOR = m_monitor.lock();
+        const bool HASRESERVED  = COVERMONITOR && (COVERMONITOR->m_reservedArea.left() > 0 || COVERMONITOR->m_reservedArea.right() > 0 ||
+                                                  COVERMONITOR->m_reservedArea.top() > 0 || COVERMONITOR->m_reservedArea.bottom() > 0);
+        if (m_target && COVERMONITOR && HASRESERVED && !requestedInternalFSMode.has_value() && !requestedClientFSMode.has_value() && !requestedFSState.has_value() &&
+            !(m_suppressedEvents & Desktop::View::SUPPRESS_FULLSCREEN) && !m_ruleApplicator->static_.floating.value_or(false) && !m_ruleApplicator->static_.size.has_value()) {
+            if (const auto DESIRED = m_target->desiredGeometry(); DESIRED) {
+                const auto OUTPUT = COVERMONITOR->logicalBox().size();
+                if (DESIRED->size.x >= OUTPUT.x && DESIRED->size.y >= OUTPUT.y)
+                    requestedInternalFSMode = Fullscreen::FSMODE_FULLSCREEN;
+            }
+        }
+
         if (!m_ruleApplicator->static_.group.empty()) {
             if (!(m_groupRules & Desktop::View::GROUP_OVERRIDE) && trim(m_ruleApplicator->static_.group) != "group") {
                 CVarList2   vars(std::string{m_ruleApplicator->static_.group}, 0, 's');
