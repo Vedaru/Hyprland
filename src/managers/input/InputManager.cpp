@@ -308,6 +308,30 @@ void CInputManager::mouseMoveUnified(uint32_t time, bool refocus, bool mouse, st
         PROTO::relativePointer->sendRelativeMotion(sc<uint64_t>(time) * 1000, {}, {});
     };
 
+    // A client pointer lock/confine (fullscreen games) or the confine_pointer
+    // rule normally forwards all input to the constrained window before any
+    // layer hit-test. A layer surface drawn above that window -- e.g. a bar on
+    // the overlay layer, which per the layer-shell spec sits above fullscreen --
+    // stays visible over it, so it must keep receiving the pointer. Only
+    // evaluated when a constraint is actually active to keep the hot path cheap.
+    const auto POINTEROVERLAYER = [&]() -> bool {
+        PHLLS    found  = nullptr;
+        Vector2D coords = {};
+
+        if (Desktop::viewState()->hitTest().layerSurfaceAt(mouseCoords, &PMONITOR->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY], &coords, &found))
+            return true;
+
+        if (!Desktop::viewState()->hitTest().layerSurfaceAt(mouseCoords, &PMONITOR->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_TOP], &coords, &found))
+            return false;
+
+        // a top layer only sits above a fullscreen window when it asks to
+        const auto PWORKSPACE      = PMONITOR->m_activeSpecialWorkspace ? PMONITOR->m_activeSpecialWorkspace : PMONITOR->m_activeWorkspace;
+        const auto HAS_EXCLUSIVEFS = (Fullscreen::controller()->hasFullscreen(PWORKSPACE) && Fullscreen::controller()->getFullscreenModes(PWORKSPACE).internal == Fullscreen::FSMODE_FULLSCREEN) ||
+            (Fullscreen::controller()->hasFullscreen(PMONITOR) && Fullscreen::controller()->getFullscreenModes(PMONITOR).internal == Fullscreen::FSMODE_FULLSCREEN);
+
+        return !HAS_EXCLUSIVEFS || found->m_aboveFullscreen;
+    };
+
     if (!g_pSeatManager->m_mouse.expired()) {
         const auto SURF = Desktop::View::CWLSurface::fromResource(Desktop::focusState()->surface());
 
@@ -315,14 +339,16 @@ void CInputManager::mouseMoveUnified(uint32_t time, bool refocus, bool mouse, st
             const auto CONSTRAINT = SURF ? SURF->constraint() : nullptr;
 
             if (CONSTRAINT) {
-                if (CONSTRAINT->isLocked()) {
-                    const auto HINT = CONSTRAINT->logicPositionHint();
-                    Pointer::pointerController()->warpTo(HINT, true);
-                } else {
-                    confineToRegion(CONSTRAINT->logicConstraintRegion(), SURF);
-                }
+                if (!POINTEROVERLAYER()) {
+                    if (CONSTRAINT->isLocked()) {
+                        const auto HINT = CONSTRAINT->logicPositionHint();
+                        Pointer::pointerController()->warpTo(HINT, true);
+                    } else {
+                        confineToRegion(CONSTRAINT->logicConstraintRegion(), SURF);
+                    }
 
-                return;
+                    return;
+                }
             } else {
                 Log::logger->log(Log::ERR, "BUG THIS: Null SURF/CONSTRAINT in mouse refocus. Ignoring constraints. {:x} {:x}", rc<uintptr_t>(SURF.get()),
                                  rc<uintptr_t>(CONSTRAINT.get()));
@@ -330,7 +356,7 @@ void CInputManager::mouseMoveUnified(uint32_t time, bool refocus, bool mouse, st
         } else {
             const auto WINDOW = SURF ? Desktop::View::CWindow::fromView(SURF->view()) : nullptr;
             if (WINDOW) {
-                if (WINDOW->m_ruleApplicator->confinePointer().valueOrDefault()) {
+                if (WINDOW->m_ruleApplicator->confinePointer().valueOrDefault() && !POINTEROVERLAYER()) {
                     const auto BOX = SURF->getSurfaceBoxGlobal();
                     if (BOX.has_value()) {
                         CRegion rg;
