@@ -69,6 +69,12 @@ void CFallbackStateKeeper::initSignals() {
     // can run properly
 
     m_listeners.ready = Event::bus()->m_events.ready.listen([this] {
+        // The first frame can be rendered before startCompositor() emits ready, in
+        // which case the start listener below has already run and there is nothing
+        // left to wait for. Arming the timer here would make it fire uneventfully.
+        if (m_startFired)
+            return;
+
         m_launchTimer = makeShared<CEventLoopTimer>(
             std::chrono::milliseconds(READY_TIMEOUT_TO_UNSAFE_MS),
             [this](SP<CEventLoopTimer> self, void* data) {
@@ -88,6 +94,8 @@ void CFallbackStateKeeper::initSignals() {
     });
 
     m_listeners.start = Event::bus()->m_events.start.listen([this] {
+        m_startFired = true;
+
         Log::logger->log(Log::WARN, "[FallbackStateKeeper] Start fired, removing fallback timer");
 
         g_pEventLoopManager->removeTimer(m_launchTimer);

@@ -28,6 +28,7 @@ namespace State {
         bool                m_fallbackActive = false;
 
         SP<CEventLoopTimer> m_launchTimer;
+        bool                m_startFired = false;
 
         bool                m_fallbackStateUpdateDeferred = false;
 

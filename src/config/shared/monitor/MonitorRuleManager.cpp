@@ -242,8 +242,9 @@ void CMonitorRuleManager::ensureVRR(PHLMONITOR pMonitor) {
                         m->m_output->state->setAdaptiveSync(false);
                     }
 
-                    if (!m->m_state.commit())
-                        Log::logger->log(Log::ERR, "Couldn't commit output {} in ensureVRR -> true", m->m_output->name);
+                    // no commit here: the backend programs the VRR property on every enabled
+                    // commit, so the next regular commit applies it. Committing now with no
+                    // fresh buffer would make the backend fall back to a blocking modeset.
                 }
                 m->m_vrrActive = true;
             } else {
