@@ -44,6 +44,7 @@
 #include "../../managers/eventLoop/EventLoopManager.hpp"
 #include "../../managers/eventLoop/EventLoopTimer.hpp"
 #include "../../protocols/XDGShell.hpp"
+#include "../../protocols/XDGDialog.hpp"
 #include "../../protocols/core/Compositor.hpp"
 #include "../../protocols/core/Subcompositor.hpp"
 #include "../../protocols/ContentType.hpp"
@@ -2922,10 +2923,35 @@ void CWindow::unmanagedSetGeometry() {
     }
 }
 
+// A parentless modal xdg-dialog (e.g. an application's start-up / splash window) is app-modal with
+// nothing to be transient for and nothing meaningful to be resized against: the client presents it
+// as a single, fixed layout. Pin its current size as both min and max, exactly as if the client had
+// declared min == max, so the user cannot drag its edges or frame into a stretched layout. This is
+// the same state GTK produces for set_resizable(false); it is keyed purely off the client's own
+// protocol state (no rule, no app name).
+static std::optional<Vector2D> fixedDialogSize(PHLWINDOW window) {
+    if (!window || window->m_isX11 || !window->m_xdgSurface || !window->m_xdgSurface->m_toplevel)
+        return std::nullopt;
+
+    const auto TOPLEVEL = window->m_xdgSurface->m_toplevel;
+    if (TOPLEVEL->m_parent || !TOPLEVEL->m_dialog || !TOPLEVEL->m_dialog->modal)
+        return std::nullopt;
+
+    const auto SIZE = window->size(IGeometric::GEOMETRIC_GOAL);
+    if (SIZE.x < 1 || SIZE.y < 1)
+        return std::nullopt;
+
+    return SIZE;
+}
+
 std::optional<Vector2D> CWindow::minSize() {
     // first check for overrides
     if (m_ruleApplicator->minSize().hasValue())
         return m_ruleApplicator->minSize().value();
+
+    // a parentless modal dialog has a single, fixed size
+    if (const auto FIXED = fixedDialogSize(m_self.lock()); FIXED)
+        return FIXED;
 
     // then check if we have any proto overrides
     bool hasSizeHints = m_xwaylandSurface ? !!m_xwaylandSurface->m_sizeHints : false;
@@ -2948,6 +2974,10 @@ std::optional<Vector2D> CWindow::maxSize() {
     // then check if we have any proto overrides
     if (((m_isX11 && !m_xwaylandSurface->m_sizeHints) || (!m_isX11 && (!m_xdgSurface || !m_xdgSurface->m_toplevel)) || m_ruleApplicator->noMaxSize().valueOrDefault()))
         return std::nullopt;
+
+    // a parentless modal dialog has a single, fixed size
+    if (const auto FIXED = fixedDialogSize(m_self.lock()); FIXED)
+        return FIXED;
 
     constexpr const double NO_MAX_SIZE_LIMIT = std::numeric_limits<double>::max();
 
