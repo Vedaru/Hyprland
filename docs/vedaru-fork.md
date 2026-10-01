@@ -2,8 +2,8 @@
 
 A fork of [hyprwm/Hyprland](https://github.com/hyprwm/Hyprland), based on upstream
 tag `v0.56.2` (`efb50993780079460b0cbed1363e2166a2de1d9f`, 2026-08-05). Everything
-below is either upstream as-is or one of the 14 commits this fork carries on top
-of it. Primary branch: `vedaru/v0.56.2-ime-popup`.
+below is either upstream as-is or one of the commits this fork carries on top of
+it. Primary branch: `vedaru/v0.56.2-ime-popup`.
 
 This fork is the compositor for a self-built daily driver configured in **Lua**
 (`~/.config/hypr/hyprland.lua`), which selects `Config::Lua::CConfigManager`
@@ -13,6 +13,19 @@ of that.
 ## Modifications
 
 ### Compositor behaviour
+
+**`062c25e0` — view: pin a parentless modal xdg-dialog to a fixed size**
+
+Once `8db15170` floated parentless modal xdg-dialogs, the borders of such a
+window (Kdenlive's Quick Setup / splash) could be dragged, stretching a surface
+the client lays out as a single, fixed size. A parentless modal has nothing to
+be transient for and no meaningful resize behaviour, so it now reports its
+current size as both min and max — the same state a client declares with
+`min == max`, which is what GTK's `set_resizable(false)` produces for Faugus.
+The drag-resize clamp, `getGeometryForWindow` and `clampSizeForDesired` all snap
+to it. Keyed purely off the client's own protocol state (parentless +
+`xdg_dialog_v1` modal), so there is no rule, no app name and no config option;
+explicit `minSize`/`maxSize` rules still take precedence.
 
 **`fc91f418` — ipc: keep classic `dispatch <name> <arg>` valid under the lua config manager**
 
